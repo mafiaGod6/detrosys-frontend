@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
+  AlertTriangle,
   ArrowUpRight,
   Bot,
   Calendar,
@@ -7,12 +8,14 @@ import {
   Clock,
   CreditCard,
   Layers,
+  Loader2,
   Mail,
   MessageSquare,
   ReceiptText,
   Sparkles,
   Users,
   Workflow,
+  XCircle,
 } from "lucide-react";
 import { useNavigate } from "react-router";
 
@@ -44,6 +47,21 @@ type PlanDetails = {
   aiCredits: string;
   supportSla: string;
 };
+
+type CancelOutcome = "refund" | "period_end";
+
+type CancelPreview = {
+  can_cancel: boolean;
+  reason: string | null;
+  outcome: CancelOutcome | null;
+  refund_amount: string | number | null;
+  currency: string | null;
+  refund_deadline: string | null;
+  access_until: string | null;
+  already_scheduled: boolean;
+};
+
+const PAID_PLAN_SLUGS = ["basic", "pro", "advanced"];
 
 const PLAN_CATALOG: Record<string, PlanDetails> = {
   none: {
@@ -124,81 +142,155 @@ export function SettingsBillingPage() {
   const [currency, setCurrency] = useState<string>("INR");
   const [isYearly, setIsYearly] = useState<boolean>(false);
   const [renewalDate, setRenewalDate] = useState<string | null>(null);
+  const [cancelAtPeriodEnd, setCancelAtPeriodEnd] = useState<boolean>(false);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    async function fetchBilling() {
-      try {
-        const token = localStorage.getItem(ACCESS_TOKEN_KEY);
-        const headers = {
-          Accept: "application/json",
-          Authorization: `Bearer ${token}`,
-        };
+  const [cancelOpen, setCancelOpen] = useState(false);
+  const [preview, setPreview] = useState<CancelPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
-        const [statusRes, subRes] = await Promise.allSettled([
-          fetch(`${API_BASE_URL}/billing/status`, { headers }).then((r) =>
-            r.ok ? r.json() : null,
-          ),
-          fetch(`${API_BASE_URL}/billing/subscription`, { headers }).then((r) =>
-            r.ok ? r.json() : null,
-          ),
-        ]);
+  const fetchBilling = useCallback(async () => {
+    try {
+      const headers = authHeaders();
 
-        let resolved = "free";
-        let resolvedCurrency = "INR";
+      const [statusRes, subRes] = await Promise.allSettled([
+        fetch(`${API_BASE_URL}/billing/status`, { headers }).then((r) =>
+          r.ok ? r.json() : null,
+        ),
+        fetch(`${API_BASE_URL}/billing/subscription`, { headers }).then((r) =>
+          r.ok ? r.json() : null,
+        ),
+      ]);
 
-        if (statusRes.status === "fulfilled" && statusRes.value) {
-          const data = statusRes.value;
-          let raw = data?.plan || data?.plan_slug;
-          if (typeof raw === "object" && raw !== null) {
-            raw = (raw as any).slug || (raw as any).name;
-          }
-          const val = String(raw || "free").toLowerCase().trim();
-          if (val.includes("adv")) resolved = "advanced";
-          else if (val.includes("pro")) resolved = "pro";
-          else if (val.includes("basic")) resolved = "basic";
-          else if (val === "none") resolved = "none";
+      let resolved = "free";
+      let resolvedCurrency = "INR";
+      let yearly = false;
+      let renewal: string | null = null;
+      let scheduledCancel = false;
 
-          if (data?.currency) {
-            resolvedCurrency = String(data.currency).toUpperCase();
-          }
-
-          if (data?.billing_interval === "year" || data?.interval === "year") {
-            setIsYearly(true);
-          }
-          if (data?.current_period_end) {
-            setRenewalDate(formatDate(data.current_period_end));
-          }
+      if (statusRes.status === "fulfilled" && statusRes.value) {
+        const data = statusRes.value;
+        let raw = data?.plan || data?.plan_slug;
+        if (typeof raw === "object" && raw !== null) {
+          raw = (raw as any).slug || (raw as any).name;
         }
+        const val = String(raw || "free").toLowerCase().trim();
+        if (val.includes("adv")) resolved = "advanced";
+        else if (val.includes("pro")) resolved = "pro";
+        else if (val.includes("basic")) resolved = "basic";
+        else if (val === "none") resolved = "none";
 
-        if (subRes.status === "fulfilled" && subRes.value) {
-          const subData = subRes.value;
-          if (subData?.currency) {
-            resolvedCurrency = String(subData.currency).toUpperCase();
-          }
-          if (
-            subData?.billing_interval === "year" ||
-            subData?.interval === "year"
-          ) {
-            setIsYearly(true);
-          }
-          if (subData?.current_period_end) {
-            setRenewalDate(formatDate(subData.current_period_end));
-          }
+        if (data?.currency) {
+          resolvedCurrency = String(data.currency).toUpperCase();
         }
-
-        setPlanSlug(resolved);
-        setCurrency(resolvedCurrency);
-        localStorage.setItem("detrosys_plan", resolved);
-      } catch {
-        // Fallback
-      } finally {
-        setLoading(false);
+        if (data?.billing_interval === "year" || data?.interval === "year") {
+          yearly = true;
+        }
+        if (data?.current_period_end) {
+          renewal = formatDate(data.current_period_end);
+        }
       }
-    }
 
-    void fetchBilling();
+      if (subRes.status === "fulfilled" && subRes.value) {
+        const subData = subRes.value;
+        if (subData?.currency) {
+          resolvedCurrency = String(subData.currency).toUpperCase();
+        }
+        if (
+          subData?.billing_interval === "year" ||
+          subData?.interval === "year"
+        ) {
+          yearly = true;
+        }
+        if (subData?.current_period_end) {
+          renewal = formatDate(subData.current_period_end);
+        }
+        scheduledCancel = Boolean(subData?.cancel_at_period_end);
+      }
+
+      setPlanSlug(resolved);
+      setCurrency(resolvedCurrency);
+      setIsYearly(yearly);
+      setRenewalDate(renewal);
+      setCancelAtPeriodEnd(scheduledCancel);
+      localStorage.setItem("detrosys_plan", resolved);
+    } catch {
+      // Fallback
+    } finally {
+      setLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    void fetchBilling();
+  }, [fetchBilling]);
+
+  const canShowCancel = PAID_PLAN_SLUGS.includes(planSlug) && !cancelAtPeriodEnd;
+
+  async function openCancelDialog() {
+    setCancelOpen(true);
+    setPreview(null);
+    setCancelError(null);
+    setPreviewLoading(true);
+    try {
+      const res = await fetch(
+        `${API_BASE_URL}/billing/subscription/cancel-preview`,
+        { headers: authHeaders() },
+      );
+      if (!res.ok) {
+        setCancelError(await readError(res));
+        return;
+      }
+      setPreview((await res.json()) as CancelPreview);
+    } catch {
+      setCancelError("Could not reach the server. Please try again.");
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
+
+  function closeCancelDialog() {
+    if (cancelling) return;
+    setCancelOpen(false);
+    setPreview(null);
+    setCancelError(null);
+  }
+
+  async function confirmCancel() {
+    if (!preview?.can_cancel || !preview.outcome || cancelling) return;
+    setCancelling(true);
+    setCancelError(null);
+    try {
+      const res = await fetch(`${API_BASE_URL}/billing/subscription/cancel`, {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ expected_outcome: preview.outcome }),
+      });
+      if (!res.ok) {
+        setCancelError(await readError(res));
+        // The server state may have moved on; refresh what the user sees.
+        void fetchBilling();
+        return;
+      }
+      const data = await res.json();
+      setNotice(
+        data?.message ||
+          "Your subscription has been cancelled.",
+      );
+      setCancelOpen(false);
+      setPreview(null);
+      await fetchBilling();
+    } catch {
+      setCancelError(
+        "We could not confirm the result. Please refresh this page to check your subscription before trying again.",
+      );
+    } finally {
+      setCancelling(false);
+    }
+  }
 
   const plan = PLAN_CATALOG[planSlug] || PLAN_CATALOG.free;
   
@@ -228,6 +320,22 @@ export function SettingsBillingPage() {
       </div>
 
       <div className="mt-6 space-y-10">
+        {notice && (
+          <div
+            role="status"
+            className="flex items-start justify-between gap-4 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-5 py-4 text-sm text-emerald-700 dark:text-emerald-300"
+          >
+            <span>{notice}</span>
+            <button
+              type="button"
+              onClick={() => setNotice(null)}
+              className="text-xs font-semibold underline"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
         <section className="rounded-3xl border border-neutral-200 bg-[#f5f3ee] p-7 shadow-sm dark:border-white/[0.08] dark:bg-[#121212] sm:p-9">
           <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
             <div>
@@ -235,10 +343,21 @@ export function SettingsBillingPage() {
                 <span className="text-[10px] font-semibold uppercase tracking-[0.22em] text-neutral-400 dark:text-neutral-500">
                   Current Workspace Plan
                 </span>
-                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">
-                  <CheckCircle2 size={12} strokeWidth={2.2} />
-                  Active
-                </span>
+                {!loading && planSlug === "none" ? (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-neutral-500/10 px-2.5 py-0.5 text-[10px] font-semibold text-neutral-500">
+                    No active plan
+                  </span>
+                ) : !loading && cancelAtPeriodEnd ? (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2.5 py-0.5 text-[10px] font-semibold text-amber-600 dark:text-amber-400">
+                    <AlertTriangle size={12} strokeWidth={2.2} />
+                    Cancelling
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">
+                    <CheckCircle2 size={12} strokeWidth={2.2} />
+                    Active
+                  </span>
+                )}
               </div>
 
               <div className="mt-3 flex flex-wrap items-baseline gap-3">
@@ -253,7 +372,10 @@ export function SettingsBillingPage() {
               {renewalDate && (
                 <p className="mt-2.5 flex items-center gap-1.5 text-xs text-neutral-500 dark:text-neutral-400">
                   <Calendar size={13} className="text-neutral-400" />
-                  <span>Next billing date: <strong>{renewalDate}</strong></span>
+                  <span>
+                    {cancelAtPeriodEnd ? "Access ends on" : "Next billing date"}:{" "}
+                    <strong>{renewalDate}</strong>
+                  </span>
                 </p>
               )}
             </div>
@@ -266,14 +388,33 @@ export function SettingsBillingPage() {
               <p className="text-[11px] text-neutral-400 dark:text-neutral-500">
                 Tax-inclusive Merchant of Record checkout via Paddle
               </p>
-              <button
-                type="button"
-                onClick={() => navigate("/pricing")}
-                className="mt-1 inline-flex items-center gap-1.5 rounded-xl bg-neutral-950 px-4 py-2 text-xs font-semibold text-white transition hover:bg-neutral-800 dark:bg-white dark:text-neutral-950 dark:hover:bg-neutral-200"
-              >
-                Change Plan
-                <ArrowUpRight size={13} />
-              </button>
+              <div className="mt-1 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => navigate("/pricing")}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-neutral-950 px-4 py-2 text-xs font-semibold text-white transition hover:bg-neutral-800 dark:bg-white dark:text-neutral-950 dark:hover:bg-neutral-200"
+                >
+                  Change Plan
+                  <ArrowUpRight size={13} />
+                </button>
+
+                {canShowCancel && (
+                  <button
+                    type="button"
+                    onClick={() => void openCancelDialog()}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-red-500/40 px-4 py-2 text-xs font-semibold text-red-600 transition hover:bg-red-500/10 dark:text-red-400"
+                  >
+                    <XCircle size={13} />
+                    Cancel Plan
+                  </button>
+                )}
+
+                {PAID_PLAN_SLUGS.includes(planSlug) && cancelAtPeriodEnd && (
+                  <span className="inline-flex items-center gap-1.5 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs font-semibold text-amber-700 dark:text-amber-400">
+                    Cancellation scheduled
+                  </span>
+                )}
+              </div>
             </div>
           </div>
         </section>
@@ -378,6 +519,168 @@ export function SettingsBillingPage() {
           </div>
         </section>
       </div>
+
+      {cancelOpen && (
+        <CancelDialog
+          preview={preview}
+          loading={previewLoading}
+          cancelling={cancelling}
+          error={cancelError}
+          planName={plan.name}
+          onClose={closeCancelDialog}
+          onConfirm={() => void confirmCancel()}
+        />
+      )}
+    </div>
+  );
+}
+
+function CancelDialog({
+  preview,
+  loading,
+  cancelling,
+  error,
+  planName,
+  onClose,
+  onConfirm,
+}: {
+  preview: CancelPreview | null;
+  loading: boolean;
+  cancelling: boolean;
+  error: string | null;
+  planName: string;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const isRefund = preview?.outcome === "refund";
+  const canConfirm = Boolean(preview?.can_cancel) && !loading && !cancelling;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      onClick={onClose}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="cancel-dialog-title"
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-md rounded-3xl border border-neutral-200 bg-white p-7 shadow-xl dark:border-white/[0.08] dark:bg-[#141414]"
+      >
+        <h2
+          id="cancel-dialog-title"
+          className="text-lg font-semibold text-neutral-950 dark:text-white"
+        >
+          Cancel {planName} plan?
+        </h2>
+
+        <div className="mt-4 text-sm leading-6 text-neutral-600 dark:text-neutral-300">
+          {loading && (
+            <p className="flex items-center gap-2">
+              <Loader2 size={15} className="animate-spin" />
+              Checking your cancellation options...
+            </p>
+          )}
+
+          {!loading && preview && !preview.can_cancel && (
+            <p>{preview.reason || "This subscription cannot be cancelled."}</p>
+          )}
+
+          {!loading && preview?.can_cancel && isRefund && (
+            <div className="space-y-3">
+              <p>
+                You are within the 7-day refund window
+                {preview.refund_deadline
+                  ? ` (ends ${formatDate(preview.refund_deadline)})`
+                  : ""}
+                .
+              </p>
+              <ul className="list-disc space-y-1 pl-5">
+                <li>
+                  Your plan is cancelled <strong>immediately</strong> and
+                  access to plan features ends right away.
+                </li>
+                <li>
+                  You are refunded{" "}
+                  <strong>
+                    {formatMoney(preview.refund_amount, preview.currency)}
+                  </strong>{" "}
+                  in full to your original payment method.
+                </li>
+                <li>
+                  Refunds are reviewed by our payment provider and can take a
+                  few days.
+                </li>
+              </ul>
+            </div>
+          )}
+
+          {!loading && preview?.can_cancel && !isRefund && (
+            <div className="space-y-3">
+              <p>
+                The 7-day refund window has passed, so this payment is{" "}
+                <strong>not refundable</strong>.
+              </p>
+              <ul className="list-disc space-y-1 pl-5">
+                <li>
+                  You keep full access until{" "}
+                  <strong>
+                    {preview.access_until
+                      ? formatDate(preview.access_until)
+                      : "the end of your billing period"}
+                  </strong>
+                  .
+                </li>
+                <li>You will not be charged again.</li>
+              </ul>
+            </div>
+          )}
+
+          {error && (
+            <p
+              role="alert"
+              className="mt-4 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-600 dark:text-red-400"
+            >
+              {error}
+            </p>
+          )}
+        </div>
+
+        <div className="mt-6 flex flex-wrap justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={cancelling}
+            className="rounded-xl border border-neutral-300 px-4 py-2 text-xs font-semibold text-neutral-700 transition hover:bg-neutral-100 disabled:opacity-50 dark:border-white/10 dark:text-neutral-300 dark:hover:bg-white/[0.05]"
+          >
+            Keep my plan
+          </button>
+
+          {preview?.can_cancel && (
+            <button
+              type="button"
+              onClick={onConfirm}
+              disabled={!canConfirm}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-red-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {cancelling && <Loader2 size={13} className="animate-spin" />}
+              {cancelling
+                ? "Cancelling..."
+                : isRefund
+                  ? "Cancel and refund"
+                  : "Cancel at period end"}
+            </button>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -422,5 +725,42 @@ function formatDate(dateString: string): string {
     });
   } catch {
     return dateString;
+  }
+}
+
+function authHeaders(): Record<string, string> {
+  const token = localStorage.getItem(ACCESS_TOKEN_KEY);
+  return {
+    Accept: "application/json",
+    Authorization: `Bearer ${token}`,
+  };
+}
+
+async function readError(res: Response): Promise<string> {
+  try {
+    const body = await res.json();
+    const detail = body?.detail;
+    if (typeof detail === "string" && detail) return detail;
+    if (Array.isArray(detail) && detail[0]?.msg) return String(detail[0].msg);
+  } catch {
+    // fall through
+  }
+  return "Something went wrong. Please try again.";
+}
+
+function formatMoney(
+  amount: string | number | null,
+  currency: string | null,
+): string {
+  if (amount === null || amount === undefined) return "your payment";
+  const value = Number(amount);
+  if (Number.isNaN(value)) return String(amount);
+  try {
+    return new Intl.NumberFormat(currency === "INR" ? "en-IN" : "en-US", {
+      style: "currency",
+      currency: currency || "USD",
+    }).format(value);
+  } catch {
+    return `${value.toFixed(2)} ${currency ?? ""}`.trim();
   }
 }
