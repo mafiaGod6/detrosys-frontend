@@ -1,0 +1,10 @@
+User-agent: *
+Allow: /
+Disallow: /app
+Disallow: /billing
+Disallow: /onboarding
+Disallow: /verify-email
+Disallow: /verification-success
+Disallow: /reset-password
+
+Sitemap: https://detrosys.online/sitemap.xml
