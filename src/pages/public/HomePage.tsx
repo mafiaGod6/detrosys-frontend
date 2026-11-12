@@ -705,7 +705,7 @@ export function HomePage() {
                   onClick={toggleSound}
                   className="block h-auto w-full cursor-pointer object-contain"
                 >
-                  <source src="/videos/product-tour.mp4" type="video/mp4" />
+                  <source src="/videos/product-design.mp4" type="video/mp4" />
                   Your browser does not support the video tag.
                 </video>
 
